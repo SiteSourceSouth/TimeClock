@@ -455,8 +455,12 @@ async function punch(type){
     const res = await postClock(payload);
     handleServerResult(type, res, loc);
   }catch(err){
-    // Network failure → queue and reassure.
+    // Network failure → queue and reassure. Reflect the punch on the timer now
+    // (start on 'in', clear on 'out') even though it's only queued, and cancel
+    // any in-flight status check so it can't fight the local state.
     queueAdd(payload);
+    _statusToken++;
+    setClockTimer(type, payload.clientTime);
     showResult({
       icon:'📶', color:'var(--amber)',
       title:'Saved — no signal',
@@ -542,6 +546,18 @@ function showOnClock(startMs){
   tick(); _onclockTimer=setInterval(tick,1000);
 }
 function hideOnClock(){ const b=$('onclock-banner'); if(b) b.classList.add('hidden'); if(_onclockTimer){ clearInterval(_onclockTimer); _onclockTimer=null; } }
+// Set the on-clock timer to match a punch (used by both the online result and the
+// offline-queue path). 'in' starts it, 'out' clears it.
+function setClockTimer(type, atISO){
+  if(type==='in'){
+    const iso = atISO || new Date().toISOString();
+    localStorage.setItem('tc_clockin', JSON.stringify({ at:iso, email:$('email').value.trim().toLowerCase() }));
+    showOnClock(new Date(iso).getTime());
+  } else {
+    localStorage.removeItem('tc_clockin');
+    hideOnClock();
+  }
+}
 function loadOnClock(){
   try{ const c=JSON.parse(localStorage.getItem('tc_clockin')||'null'); if(c&&c.at){ const ms=new Date(c.at).getTime(); if(!isNaN(ms)){ showOnClock(ms); return; } } }catch(e){}
   hideOnClock();
@@ -559,15 +575,12 @@ function syncOnClockWithStatus(data){
 function handleServerResult(type, res, loc){
   if(!res){ errorish('No response from server. Try again.'); return; }
   if(res.ok){
+    // A punch is the freshest truth — cancel any in-flight status check so a
+    // stale "you're clocked in" reply can't re-show the timer after a clock-out.
+    _statusToken++;
+    state.status = type; state.statusAt = fmtTime(res.at || new Date().toISOString());
     // Start / stop the running "on the clock" timer.
-    if(type==='in'){
-      const startISO = res.at || new Date().toISOString();
-      localStorage.setItem('tc_clockin', JSON.stringify({ at:startISO, email:$('email').value.trim().toLowerCase() }));
-      showOnClock(new Date(startISO).getTime());
-    } else {
-      localStorage.removeItem('tc_clockin');
-      hideOnClock();
-    }
+    setClockTimer(type, res.at);
     const locLine = loc.ok
       ? { cls:'ok', text:`📍 Location captured (±${loc.acc} m)` }
       : { cls:'warn', text:'📍 Location not available' };
