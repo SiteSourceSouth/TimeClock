@@ -238,7 +238,7 @@ const CONFIG = {
   COMPANY: "SSS Time Clock",      // shown in the header
   PIN_LENGTH: 4,                  // digits in an employee PIN (4–6)
   REQUIRE_LOCATION: true,         // if true, a denied/failed location asks for confirmation
-  GEO_TIMEOUT_MS: 12000,
+  GEO_TIMEOUT_MS: 8000,           // Stage-1 GPS timeout; then falls back to fast network location
 };
 
 /* Allow a URL override for quick testing without editing the file:
@@ -344,11 +344,22 @@ $('switch-user').addEventListener('click',()=>{
 function getLocation(){
   return new Promise((resolve)=>{
     if(!('geolocation' in navigator)){ resolve({ok:false,reason:'unsupported'}); return; }
-    navigator.geolocation.getCurrentPosition(
-      (pos)=>resolve({ ok:true, lat:pos.coords.latitude, lng:pos.coords.longitude,
-                       acc:Math.round(pos.coords.accuracy||0) }),
+    const done=(pos)=>resolve({ ok:true, lat:pos.coords.latitude, lng:pos.coords.longitude,
+                                acc:Math.round(pos.coords.accuracy||0) });
+    // Stage 2 fallback: network location (wifi / cell towers). Fast, and it locks
+    // indoors, inside a shelter, or in the truck — where high-accuracy GPS times out.
+    const netTry=()=>navigator.geolocation.getCurrentPosition(
+      done,
       (err)=>resolve({ ok:false, reason: err.code===1?'denied':(err.code===3?'timeout':'error') }),
-      { enableHighAccuracy:true, timeout:CONFIG.GEO_TIMEOUT_MS, maximumAge:30000 }
+      { enableHighAccuracy:false, timeout:15000, maximumAge:120000 }
+    );
+    // Stage 1: precise GPS, but bail fast to the network fallback if it can't lock.
+    // A recent fix (up to 60s old) is accepted instantly so warm GPS never waits.
+    // A true permission deny (code 1) skips the fallback — retrying won't help.
+    navigator.geolocation.getCurrentPosition(
+      done,
+      (err)=>{ if(err.code===1) resolve({ ok:false, reason:'denied' }); else netTry(); },
+      { enableHighAccuracy:true, timeout:CONFIG.GEO_TIMEOUT_MS, maximumAge:60000 }
     );
   });
 }
@@ -625,8 +636,8 @@ function fmtTime(iso){
 function confirmNoLocation(reason){
   return new Promise((resolve)=>{
     const why = reason==='denied'
-      ? 'Location permission is off. Your punch will be recorded without a location.'
-      : 'Could not get your location. Your punch will be recorded without a location.';
+      ? 'Location is off for this app. Your punch still counts. To fix it next time, tap "Allow While Using the App" (not "Allow Once") when your phone asks — or turn on Location for your browser in phone Settings.'
+      : 'Could not get your location (weak signal). Your punch still counts. Try stepping outside or away from metal, then punch.';
     $('panel').innerHTML = `
       <div class="big-ico">📍</div>
       <h2 style="font-size:19px">No location</h2>
