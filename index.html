@@ -62,6 +62,27 @@
     padding:12px 6px 4px; font-size:17px; font-weight:800; }
   .ts-total .big{ font-size:22px; color:var(--green2); }
 
+  /* Time-correction request */
+  .req-btn{ width:100%; margin-top:10px; border:none; background:#2b3550; color:#c7d2fe;
+    font-size:14px; font-weight:700; padding:12px; border-radius:14px; cursor:pointer; }
+  .req-btn:active{ background:#3a4668; }
+  .rq-panel{ text-align:left; max-height:82vh; overflow-y:auto; }
+  .rq-panel h3{ margin:0 0 4px; font-size:19px; font-weight:800; }
+  .rq-panel .sub{ font-size:13px; color:var(--muted); margin:0 0 16px; line-height:1.45; }
+  .rq-field{ margin-bottom:13px; }
+  .rq-panel select, .rq-panel input[type=date], .rq-panel input[type=time], .rq-panel textarea{
+    width:100%; font-size:16px; padding:12px; border:1.5px solid var(--line);
+    border-radius:12px; outline:none; background:var(--field); color:var(--cardink); font-family:inherit; }
+  .rq-panel select:focus, .rq-panel input:focus, .rq-panel textarea:focus{ border-color:var(--teal); }
+  .rq-panel textarea{ resize:vertical; min-height:56px; }
+  .rq-seg{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .rq-seg button{ border:1.5px solid var(--line); background:var(--field); color:var(--cardink);
+    font-size:15px; font-weight:700; padding:13px; border-radius:12px; cursor:pointer; }
+  .rq-seg button.on.in{ background:linear-gradient(180deg,var(--green),var(--green2)); color:#fff; border-color:transparent; }
+  .rq-seg button.on.out{ background:linear-gradient(180deg,var(--red),var(--red2)); color:#fff; border-color:transparent; }
+  .rq-actions{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:6px; }
+  .rq-actions .btn{ min-height:54px; font-size:16px; padding:14px 10px; }
+
   .card{ background:var(--card); color:var(--cardink); border-radius:22px; box-shadow:var(--shadow); padding:20px; }
 
   label{ display:block; font-size:13px; font-weight:600; color:var(--muted); margin:2px 2px 6px; }
@@ -214,6 +235,7 @@
           <button class="btn out" id="btn-out" disabled><span class="ico">■</span> CLOCK OUT</button>
         </div>
         <button type="button" class="myhours-btn" id="btn-myhours">📋 My Hours</button>
+        <button type="button" class="req-btn" id="btn-request">🕓 Request a time correction</button>
       </div>
     </div>
 
@@ -400,15 +422,25 @@ function queueGet(){ try{ return JSON.parse(localStorage.getItem('tc_queue')||'[
 function queueSet(q){ localStorage.setItem('tc_queue', JSON.stringify(q)); }
 function queueAdd(p){ const q=queueGet(); q.push(p); queueSet(q); updateNetNote(); }
 
+/* Unique id per punch. Stays with the payload through the offline queue so a
+   re-send of an already-recorded punch is recognized server-side (idempotent)
+   instead of creating a duplicate. */
+function newPunchId(){
+  try{ if(crypto && crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  return deviceId()+'-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8);
+}
+
 async function flushQueue(){
   let q = queueGet();
   if(!q.length) return;
   const remaining = [];
   for(const p of q){
     try{
-      const res = await postClock(p);
-      if(!(res && res.ok)) remaining.push(p);   // keep if server rejected transiently
-    }catch(e){ remaining.push(p); }             // still offline
+      await postClock(p);   // any JSON reply = the server decided (recorded it, or
+                            // rejected as a dup/auth) → drop it. punchId idempotency
+                            // makes a re-send of an already-recorded punch safe, so
+                            // we never keep re-trying and never double-punch.
+    }catch(e){ remaining.push(p); }   // only a real network failure keeps it queued
   }
   queueSet(remaining); updateNetNote();
 }
@@ -453,6 +485,7 @@ async function punch(type){
     type,                                  // 'in' | 'out'
     email,
     pin: state.pin,
+    punchId: newPunchId(),                 // idempotency key — survives the offline queue
     lat: loc.ok?loc.lat:'', lng: loc.ok?loc.lng:'', acc: loc.ok?loc.acc:'',
     locStatus: loc.ok?'ok':(loc.reason||'unavailable'),
     clientTime: new Date().toISOString(),
@@ -534,6 +567,61 @@ function renderTimesheet(data){
   $('ts-done').addEventListener('click',()=>{ hideOverlay(); });
 }
 $('btn-myhours').addEventListener('click', showTimesheet);
+
+/* ---------- Time-correction request ---------- */
+function showRequestForm(){
+  const email=$('email').value.trim().toLowerCase();
+  if(!email || !email.includes('@') || state.pin.length<CONFIG.PIN_LENGTH){ errorFlash('Enter your email and PIN first'); return; }
+  const today=_ymd(new Date());
+  $('panel').innerHTML =
+    '<div class="rq-panel">'
+    + '<h3>Request a time correction</h3>'
+    + '<p class="sub">Forgot to clock in or out? Enter the time you <b>should</b> have punched. Your real punch stays on the record — this asks the office to review the change.</p>'
+    + '<div class="rq-field"><label>Which punch?</label>'
+    +   '<div class="rq-seg" id="rq-seg">'
+    +     '<button type="button" class="in on" data-t="in">Clock In</button>'
+    +     '<button type="button" class="out" data-t="out">Clock Out</button>'
+    +   '</div></div>'
+    + '<div class="rq-field"><label>Date</label><input type="date" id="rq-date" value="'+today+'" max="'+today+'"></div>'
+    + '<div class="rq-field"><label>Correct time</label><input type="time" id="rq-time"></div>'
+    + '<div class="rq-field"><label>Reason (optional)</label><textarea id="rq-reason" placeholder="e.g. Forgot to clock in when I got to the site"></textarea></div>'
+    + '<div class="rq-actions">'
+    +   '<button class="btn ghost" id="rq-cancel">Cancel</button>'
+    +   '<button class="btn in" id="rq-submit">Submit request</button>'
+    + '</div></div>';
+  $('overlay').classList.add('show');
+  const seg=$('rq-seg');
+  seg.addEventListener('click', e=>{
+    const b=e.target.closest('button'); if(!b) return;
+    [...seg.children].forEach(x=>x.classList.toggle('on', x===b));
+  });
+  $('rq-cancel').addEventListener('click', ()=>hideOverlay());
+  $('rq-submit').addEventListener('click', ()=>submitRequest(()=>seg.querySelector('button.on')?.dataset.t || 'in'));
+}
+async function submitRequest(getType){
+  const email=$('email').value.trim().toLowerCase();
+  const pin=state.pin;
+  const type=getType();
+  const reqDate=$('rq-date').value;
+  const reqTime=$('rq-time').value;   // 'HH:mm'
+  const reason=$('rq-reason').value.trim();
+  if(!reqDate){ errorFlash('Pick the date'); return; }
+  if(!reqTime){ errorFlash('Pick the correct time'); return; }
+  showBusy('Sending your request…');
+  try{
+    const res=await fetch(CONFIG.BRIDGE_URL,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'request', email, pin, type, reqDate, reqTime, reason, device: deviceId() }), redirect:'follow' });
+    const data=await res.json();
+    if(data && data.ok){
+      showResult({ icon:'🕓', color:'var(--teal)', title:'Request sent',
+        who:(type==='in'?'Clock In':'Clock Out')+' correction requested',
+        when:data.requested||'',
+        metaLines:[{cls:'', text:'The office will review it. Your actual punch is unchanged.'}] });
+    } else if(data && data.code==='AUTH'){ hideOverlay(); errorFlash('Wrong email or PIN'); }
+    else { errorish((data && data.error)||'Could not send your request.'); }
+  }catch(e){ errorish("Offline — can't send the request right now. Try again when you have signal."); }
+}
+$('btn-request').addEventListener('click', showRequestForm);
 
 /* ---------- "on the clock" running timer ---------- */
 let _onclockTimer = null;
