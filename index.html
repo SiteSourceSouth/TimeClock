@@ -81,6 +81,24 @@
   .rq-seg button.on.in{ background:linear-gradient(180deg,var(--green),var(--green2)); color:#fff; border-color:transparent; }
   .rq-seg button.on.out{ background:linear-gradient(180deg,var(--red),var(--red2)); color:#fff; border-color:transparent; }
   .rq-actions{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:6px; }
+
+  /* Request days off */
+  .timeoff-btn{ width:100%; margin-top:10px; border:none; background:#14432f; color:#a7f3d0;
+    font-size:14px; font-weight:700; padding:12px; border-radius:14px; cursor:pointer; }
+  .timeoff-btn:active{ background:#1c5a3f; }
+  .to-add{ display:grid; grid-template-columns:1fr auto; gap:10px; align-items:stretch; }
+  .to-add button{ border:none; background:#2b3550; color:#c7d2fe; font-size:14px; font-weight:700;
+    padding:0 16px; border-radius:12px; cursor:pointer; white-space:nowrap; }
+  .to-list{ margin:6px 0 4px; }
+  .to-row{ display:flex; align-items:center; gap:10px; padding:11px 12px; margin-bottom:8px;
+    border:1.5px solid var(--line); border-radius:12px; background:var(--field); }
+  .to-row .dlbl{ flex:1; font-weight:700; font-size:15px; color:var(--cardink); }
+  .to-row .pto{ display:flex; align-items:center; gap:6px; font-size:14px; font-weight:700; color:#0f766e; cursor:pointer; }
+  .to-row .pto input{ width:20px; height:20px; accent-color:#0d9488; }
+  .to-row.is-pto{ border-color:#14b8a6; background:#ecfdf5; }
+  .to-row .rm{ border:none; background:transparent; color:#b91c1c; font-size:20px; font-weight:800;
+    cursor:pointer; line-height:1; padding:0 4px; }
+  .to-empty{ color:var(--muted); font-size:13px; text-align:center; padding:10px 0; }
   .rq-actions .btn{ min-height:54px; font-size:16px; padding:14px 10px; }
 
   .card{ background:var(--card); color:var(--cardink); border-radius:22px; box-shadow:var(--shadow); padding:20px; }
@@ -236,6 +254,7 @@
         </div>
         <button type="button" class="myhours-btn" id="btn-myhours">📋 My Hours</button>
         <button type="button" class="req-btn" id="btn-request">🕓 Request a time correction</button>
+        <button type="button" class="timeoff-btn" id="btn-timeoff">🌴 Request days off</button>
       </div>
     </div>
 
@@ -622,6 +641,83 @@ async function submitRequest(getType){
   }catch(e){ errorish("Offline — can't send the request right now. Try again when you have signal."); }
 }
 $('btn-request').addEventListener('click', showRequestForm);
+
+/* ---------- Request days off (+ per-day PTO) ---------- */
+let _toDays = [];   // [{ date:'YYYY-MM-DD', pto:false }]
+function _prettyDay(iso){
+  const p = String(iso||'').split('-'); if(p.length!==3) return iso;
+  const d = new Date(+p[0], +p[1]-1, +p[2]);
+  return d.toLocaleDateString(undefined, { weekday:'short', month:'short', day:'numeric' });
+}
+function showTimeoffForm(){
+  const email=$('email').value.trim().toLowerCase();
+  if(!email || !email.includes('@') || state.pin.length<CONFIG.PIN_LENGTH){ errorFlash('Enter your email and PIN first'); return; }
+  _toDays = [];
+  const today=_ymd(new Date());
+  $('panel').innerHTML =
+    '<div class="rq-panel">'
+    + '<h3>Request days off</h3>'
+    + '<p class="sub">Pick <b>each day</b> you\'ll be off. Check <b>PTO</b> on the days you want paid time off — you don\'t have to take PTO for every day. The office reviews and approves it.</p>'
+    + '<div class="rq-field"><label>Add a day</label>'
+    +   '<div class="to-add"><input type="date" id="to-date" min="'+today+'"><button type="button" id="to-add-btn">+ Add day</button></div>'
+    + '</div>'
+    + '<div class="to-list" id="to-list"></div>'
+    + '<div class="rq-field"><label>Reason (optional)</label><textarea id="to-reason" placeholder="e.g. Family trip, appointment"></textarea></div>'
+    + '<div class="rq-actions">'
+    +   '<button class="btn ghost" id="to-cancel">Cancel</button>'
+    +   '<button class="btn in" id="to-submit">Submit request</button>'
+    + '</div></div>';
+  $('overlay').classList.add('show');
+  const dEl=$('to-date'); dEl.value=today;
+  $('to-add-btn').addEventListener('click', ()=>{
+    const v=dEl.value; if(!v){ errorFlash('Pick a date'); return; }
+    if(_toDays.some(x=>x.date===v)){ errorFlash('That day is already added'); return; }
+    _toDays.push({ date:v, pto:false });
+    _toDays.sort((a,b)=>a.date<b.date?-1:1);
+    renderToList();
+  });
+  $('to-cancel').addEventListener('click', ()=>hideOverlay());
+  $('to-submit').addEventListener('click', submitTimeoff);
+  renderToList();
+}
+function renderToList(){
+  const el=$('to-list'); if(!el) return;
+  if(!_toDays.length){ el.innerHTML='<div class="to-empty">No days added yet — pick a date above and tap “+ Add day”.</div>'; return; }
+  el.innerHTML=_toDays.map((d,i)=>
+    '<div class="to-row'+(d.pto?' is-pto':'')+'">'
+    + '<span class="dlbl">'+_prettyDay(d.date)+'</span>'
+    + '<label class="pto"><input type="checkbox" data-i="'+i+'" class="to-pto" '+(d.pto?'checked':'')+'> PTO</label>'
+    + '<button type="button" class="rm" data-i="'+i+'" title="Remove">×</button>'
+    + '</div>').join('');
+  el.querySelectorAll('.to-pto').forEach(cb=>cb.addEventListener('change', e=>{
+    _toDays[+e.target.dataset.i].pto = e.target.checked; renderToList();
+  }));
+  el.querySelectorAll('.rm').forEach(b=>b.addEventListener('click', e=>{
+    _toDays.splice(+e.target.dataset.i, 1); renderToList();
+  }));
+}
+async function submitTimeoff(){
+  const email=$('email').value.trim().toLowerCase();
+  const pin=state.pin;
+  const reason=$('to-reason').value.trim();
+  if(!_toDays.length){ errorFlash('Add at least one day'); return; }
+  const days=_toDays.map(d=>({ date:d.date, pto:!!d.pto }));
+  const ptoCount=days.filter(d=>d.pto).length;
+  showBusy('Sending your request…');
+  try{
+    const res=await fetch(CONFIG.BRIDGE_URL,{ method:'POST', headers:{'Content-Type':'text/plain;charset=utf-8'},
+      body: JSON.stringify({ action:'timeoffRequest', email, pin, days, reason, device: deviceId() }), redirect:'follow' });
+    const data=await res.json();
+    if(data && data.ok){
+      showResult({ icon:'🌴', color:'var(--green2)', title:'Time-off request sent',
+        who: days.length+' day'+(days.length>1?'s':'')+' off'+(ptoCount?' · '+ptoCount+' PTO':''),
+        when:'',
+        metaLines:[{cls:'', text:'The office will review and approve it. You\'ll show as off on the schedule once approved.'}] });
+    } else if(data && data.code==='AUTH'){ hideOverlay(); errorFlash('Wrong email or PIN'); }
+    else { errorish((data && data.error)||'Could not send your request.'); }
+  }catch(e){ errorish("Offline — can't send the request right now. Try again when you have signal."); }
+}
+$('btn-timeoff').addEventListener('click', showTimeoffForm);
 
 /* ---------- "on the clock" running timer ---------- */
 let _onclockTimer = null;
