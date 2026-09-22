@@ -6,7 +6,7 @@
  * Bump CACHE_VERSION whenever you change the HTML/manifest/icons so phones
  * pull the new version instead of a stale cached copy.
  */
-const CACHE_VERSION = 'sss-timeclock-v7';
+const CACHE_VERSION = 'sss-timeclock-v8.0-crossmidnight-forcepunch-gps';
 const SHELL = [
   './',
   './index.html',

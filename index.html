@@ -61,6 +61,10 @@
   .ts-total{ display:flex; justify-content:space-between; align-items:center; margin-top:12px;
     padding:12px 6px 4px; font-size:17px; font-weight:800; }
   .ts-total .big{ font-size:22px; color:var(--green2); }
+  .office-flag{ display:inline-block; font-size:10px; font-weight:800; letter-spacing:.4px;
+    text-transform:uppercase; color:#92400e; background:#fef3c7; border:1px solid #fcd34d;
+    padding:1px 5px; border-radius:6px; vertical-align:middle; white-space:nowrap; }
+  .ts-legend{ margin-top:10px; font-size:11.5px; color:var(--muted); display:flex; align-items:center; gap:6px; }
 
   /* Time-correction request */
   .req-btn{ width:100%; margin-top:10px; border:none; background:#2b3550; color:#c7d2fe;
@@ -203,6 +207,13 @@
         <div class="lbl">⏱ You're on the clock</div>
         <div class="timer" id="onclock-timer">0:00:00</div>
         <div class="since" id="onclock-since"></div>
+      </div>
+
+      <!-- Shown when the office added your missing clock-out (force punch) since you last opened the app. -->
+      <div id="forcedout-banner" class="onclock hidden" style="background:#78350f;border-color:#b45309">
+        <div class="lbl">✔ The office clocked you out</div>
+        <div class="since" id="forcedout-msg" style="font-weight:600"></div>
+        <div class="since" style="margin-top:4px">You're all set — tap <b>Clock In</b> to start today.</div>
       </div>
 
       <div id="setup" class="setup hidden">
@@ -562,11 +573,14 @@ async function fetchHistory(weekStart){
 }
 function renderTimesheet(data){
   const isCurrent = data.weekStart >= _mondayYmd(new Date());
+  const anyOffice = data.days.some(d=>d.punches.some(p=>p.office));
   const rows=data.days.map(d=>{
-    const punch = d.punches.length ? d.punches.map(p=>(p.action==='in'?'In ':'Out ')+p.time).join(' · ') : '—';
+    const punch = d.punches.length
+      ? d.punches.map(p=>(p.action==='in'?'In ':'Out ')+_esc(p.time)+(p.office?' <span class="office-flag" title="This punch was added or changed by the office">office</span>':'')).join(' · ')
+      : '—';
     return '<div class="ts-day'+(d.punches.length?'':' empty')+'">'
       + '<div class="dow">'+_esc(d.label)+'</div>'
-      + '<div class="pun">'+_esc(punch)+'</div>'
+      + '<div class="pun">'+punch+'</div>'
       + '<div class="hrs">'+(d.hours?d.hours+'h':'—')+'</div></div>';
   }).join('');
   $('panel').innerHTML =
@@ -577,6 +591,7 @@ function renderTimesheet(data){
     +   '<button class="nav" id="ts-next"'+(isCurrent?' disabled':'')+'>▶</button>'
     + '</div>'
     + rows
+    + (anyOffice ? '<div class="ts-legend"><span class="office-flag">office</span> = added or changed by the office</div>' : '')
     + '<div class="ts-total"><span>Week total</span><span class="big">'+data.totalHours+' h</span></div>'
     + '<div class="done"><button class="btn ghost" id="ts-done">Done</button></div>'
     + '</div>';
@@ -744,6 +759,7 @@ function hideOnClock(){ const b=$('onclock-banner'); if(b) b.classList.add('hidd
 // Set the on-clock timer to match a punch (used by both the online result and the
 // offline-queue path). 'in' starts it, 'out' clears it.
 function setClockTimer(type, atISO){
+  hideForcedOut();                          // any fresh punch clears the "office clocked you out" notice
   if(type==='in'){
     const iso = atISO || new Date().toISOString();
     localStorage.setItem('tc_clockin', JSON.stringify({ at:iso, email:$('email').value.trim().toLowerCase() }));
@@ -757,14 +773,36 @@ function loadOnClock(){
   try{ const c=JSON.parse(localStorage.getItem('tc_clockin')||'null'); if(c&&c.at){ const ms=new Date(c.at).getTime(); if(!isNaN(ms)){ showOnClock(ms); return; } } }catch(e){}
   hideOnClock();
 }
-// Keep the banner in sync with the server's known status (handles other-device / reinstall).
+// "Office clocked you out" banner — shown when THIS phone still thought it was on
+// the clock but the server says the last punch is an OUT (i.e. the office added a
+// missing clock-out via Force Punch while the app wasn't looking). Without this the
+// timer just vanished silently and the phone could offer the wrong button next day.
+function showForcedOut(at, date){
+  const b=$('forcedout-banner'); if(!b) return;
+  const m=$('forcedout-msg');
+  if(m){ const when=[date,at].filter(Boolean).join(' '); m.textContent = when ? ('Clocked out at '+when) : 'Your last shift was closed by the office'; }
+  b.classList.remove('hidden');
+}
+function hideForcedOut(){ const b=$('forcedout-banner'); if(b) b.classList.add('hidden'); }
+
+// Keep the banner in sync with the server's known status (handles other-device /
+// reinstall / office force-punch). The SERVER is the source of truth: if it says
+// they're OUT, we clear the local "on the clock" state no matter what the phone
+// remembered — and if the phone DID think it was on the clock, we tell them the
+// office closed it so they don't accidentally clock out again the next morning.
 function syncOnClockWithStatus(data){
+  let c=null; try{ c=JSON.parse(localStorage.getItem('tc_clockin')||'null'); }catch(e){}
+  const hadLocalIn = !!(c && c.at);
   if(data && data.last==='in'){
-    let c=null; try{ c=JSON.parse(localStorage.getItem('tc_clockin')||'null'); }catch(e){}
     let startMs=(c&&c.at)?new Date(c.at).getTime():NaN;
     if(isNaN(startMs)){ startMs=_parseClockStart(data.date,data.at); if(startMs) localStorage.setItem('tc_clockin', JSON.stringify({at:new Date(startMs).toISOString(), email:$('email').value.trim().toLowerCase()})); }
     if(startMs) showOnClock(startMs);
-  }else{ localStorage.removeItem('tc_clockin'); hideOnClock(); }
+    hideForcedOut();                       // genuinely on the clock
+  }else{
+    localStorage.removeItem('tc_clockin'); hideOnClock();
+    if(hadLocalIn && data && data.last==='out'){ showForcedOut(data.at, data.date); }
+    else { hideForcedOut(); }
+  }
 }
 
 function handleServerResult(type, res, loc){
@@ -816,20 +854,50 @@ function fmtTime(iso){
        + '  ·  ' + d.toLocaleDateString(undefined,{month:'short',day:'numeric'});
 }
 
-/* location-denied confirmation */
+/* location-denied warning + step-by-step fix.
+   SSS requires a location on every punch. A true permission DENY (reason==='denied')
+   is a per-phone setting the employee has to fix, so we show the exact OS steps.
+   A signal failure (timeout/error) just needs them to step outside. */
+function _isIOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent || ''); }
+function locationFixSteps(){
+  if(_isIOS()){
+    return [
+      'Open <b>Settings</b> on your iPhone',
+      'Tap <b>Privacy &amp; Security → Location Services</b> and turn it <b>ON</b>',
+      'In that same list, tap your browser (<b>Safari</b> or <b>Chrome</b>) and set it to <b>While Using the App</b>',
+      'Come back here and punch again — when it asks, tap <b>Allow While Using the App</b> (never "Allow Once" or "Don\'t Allow")'
+    ];
+  }
+  return [
+    'Open <b>Settings</b> on your phone',
+    'Tap <b>Location</b> and turn it <b>ON</b>',
+    'Go to <b>Settings → Apps → your browser (Chrome) → Permissions → Location → Allow</b>',
+    'Come back here and punch again — when it asks, tap <b>Allow while using the app</b>'
+  ];
+}
 function confirmNoLocation(reason){
   return new Promise((resolve)=>{
-    const why = reason==='denied'
-      ? 'Location is off for this app. Your punch still counts. To fix it next time, tap "Allow While Using the App" (not "Allow Once") when your phone asks — or turn on Location for your browser in phone Settings.'
-      : 'Could not get your location (weak signal). Your punch still counts. Try stepping outside or away from metal, then punch.';
-    $('panel').innerHTML = `
-      <div class="big-ico">📍</div>
-      <h2 style="font-size:19px">No location</h2>
-      <div class="meta warn" style="margin:8px 0 16px">${why}</div>
-      <div class="actions" style="margin-top:0">
-        <button class="btn ghost" id="loc-cancel" style="background:#64748b">Cancel</button>
-        <button class="btn ghost" id="loc-ok">Continue</button>
-      </div>`;
+    if(reason==='denied'){
+      const steps = locationFixSteps().map((s)=>`<li style="margin-bottom:6px">${s}</li>`).join('');
+      $('panel').innerHTML = `
+        <div class="big-ico">📍</div>
+        <h2 style="font-size:19px">Turn on Location</h2>
+        <div class="meta warn" style="margin:8px 0 10px">SSS requires your location on every clock in and out. Your punch still counts, but it is being recorded <b>without a location</b> and the office can see that. Please fix this now so it stops happening:</div>
+        <ol style="text-align:left;font-size:14px;line-height:1.45;margin:0 0 14px;padding-left:22px">${steps}</ol>
+        <div class="actions" style="margin-top:0">
+          <button class="btn ghost" id="loc-cancel" style="background:#64748b">Cancel</button>
+          <button class="btn ghost" id="loc-ok">Punch anyway</button>
+        </div>`;
+    } else {
+      $('panel').innerHTML = `
+        <div class="big-ico">📍</div>
+        <h2 style="font-size:19px">No location (weak signal)</h2>
+        <div class="meta warn" style="margin:8px 0 16px">Could not get your location — likely a weak signal. Your punch still counts. Try stepping outside or away from metal, then punch.</div>
+        <div class="actions" style="margin-top:0">
+          <button class="btn ghost" id="loc-cancel" style="background:#64748b">Cancel</button>
+          <button class="btn ghost" id="loc-ok">Continue</button>
+        </div>`;
+    }
     $('overlay').classList.add('show');
     $('loc-ok').addEventListener('click',()=>resolve(true));
     $('loc-cancel').addEventListener('click',()=>resolve(false));
